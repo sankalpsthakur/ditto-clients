@@ -90,12 +90,38 @@ export class ProxyAgent {
   /** The Agent that provides the proxy connection. */
   public readonly proxyAgent?: typeof HttpsProxyAgent;
   public readonly httpProxyAgent?: typeof HttpProxyAgent.HttpProxyAgent;
+  private readonly noProxy: string;
 
   public constructor(options?: ProxyOptions | undefined) {
     this.httpProxyAgent = buildHttpProxyAgent(options);
     this.proxyAgent = buildHttpsProxyAgent(options);
+    this.noProxy = options?.url !== undefined || options?.ignoreProxyFromEnv
+      ? '' : process.env.no_proxy || process.env.NO_PROXY || '';
   }
 
+  /** Selects a proxy per destination, respecting exclusions for environment-configured proxies. */
+  public getAgentForUrl(url: URL): typeof HttpsProxyAgent | undefined {
+    if (this.isExcluded(url)) {
+      return undefined;
+    }
+    return url.protocol === 'https:' || url.protocol === 'wss:' ? this.proxyAgent : this.httpProxyAgent;
+  }
+
+  private isExcluded(url: URL): boolean {
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+    const port = url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
+    return this.noProxy.toLowerCase().split(/[\s,]+/).some(entry => {
+      if (entry === '*') {
+        return true;
+      }
+      const match = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(entry);
+      if (match === null || (match[2] !== undefined && Number(match[2]) !== Number(port))) {
+        return false;
+      }
+      const host = match[1].replace(/^\*\./, '.').replace(/\.$/, '');
+      return host.startsWith('.') ? hostname.endsWith(host) : hostname === host;
+    });
+  }
 }
 
 /**
@@ -108,6 +134,6 @@ export interface ProxyOptions {
   username?: string;
   /** The password to authenticate to the proxy server with. */
   password?: string;
-  /** If proxy environment variables HTTPS_PROXY, https_proxy, HTTP_PROXY and http_proxy should be ignored. */
+  /** If proxy environment variables, including NO_PROXY and no_proxy, should be ignored. */
   ignoreProxyFromEnv?: boolean;
 }

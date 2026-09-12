@@ -15,6 +15,8 @@ import { ProxyAgent } from '../src/proxy-settings';
 import { NodeRequester } from '../src/node-http';
 import nock = require('nock');
 import { HttpVerb } from '../../api/src/client/constants/http-verb';
+import * as http from 'http';
+import { AddressInfo } from 'net';
 
 describe('NodeHttp', () => {
 
@@ -27,6 +29,58 @@ describe('NodeHttp', () => {
     delete process.env.https_proxy;
     delete process.env.HTTP_PROXY;
     delete process.env.http_proxy;
+    delete process.env.NO_PROXY;
+    delete process.env.no_proxy;
+  });
+
+  it.each(['http', 'https'])('bypasses the environment proxy for NO_PROXY destinations over %s', async protocol => {
+    process.env.HTTP_PROXY = 'http://proxy.invalid:3128';
+    process.env.HTTPS_PROXY = 'http://proxy.invalid:3128';
+    process.env.NO_PROXY = 'localhost';
+    const proxyAgent = new ProxyAgent({ username: 'synthetic-user', password: 'synthetic-password' });
+    nock(`${protocol}://localhost:8080`)
+      .get('/get')
+      .reply(200, function () {
+        expect(this.req.getHeader('proxy-authorization')).toBeUndefined();
+        return { proxied: Boolean((this.req as any).options.agent) };
+      });
+    const response = await new NodeRequester(proxyAgent)
+      .doRequest(HttpVerb.GET, `${protocol}://localhost:8080/get`, new Map(), '');
+    expect(response.body).toEqual({ proxied: false });
+  });
+
+  it('reaches the local destination directly while non-excluded requests reach the proxy', async () => {
+    const savedEnvironment = { ...process.env };
+    let proxyRequests = 0;
+    const destination = http.createServer((req, res) => {
+      expect(req.headers['proxy-authorization']).toBeUndefined();
+      res.end(JSON.stringify({ direct: true }));
+    });
+    const proxy = http.createServer((_req, res) => {
+      proxyRequests++;
+      res.writeHead(502);
+      res.end();
+    });
+    await Promise.all([destination, proxy].map(server => new Promise<void>(resolve => {
+      server.listen(0, '127.0.0.1', resolve);
+    })));
+    try {
+      const url = `http://127.0.0.1:${(destination.address() as AddressInfo).port}/get`;
+      process.env.HTTP_PROXY = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+      process.env.NO_PROXY = '127.0.0.1';
+      const options = { username: 'synthetic-user', password: 'synthetic-password' };
+      const response = await new NodeRequester(new ProxyAgent(options))
+        .doRequest(HttpVerb.GET, url, new Map(), '');
+      expect(response.body).toEqual({ direct: true });
+      expect(proxyRequests).toBe(0);
+      delete process.env.NO_PROXY;
+      await expect(new NodeRequester(new ProxyAgent(options))
+        .doRequest(HttpVerb.GET, url, new Map(), '')).rejects.toBeDefined();
+      expect(proxyRequests).toBe(1);
+    } finally {
+      process.env = savedEnvironment;
+      await Promise.all([destination, proxy].map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+    }
   });
 
   it('sends requests', () => {

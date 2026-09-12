@@ -20,6 +20,7 @@ import { ImmutableURL } from '../../api/src/auth/auth-provider';
 import { NodeWebSocketBasicAuth } from '../src/node-auth';
 import { NodeWebSocket } from '../src/node-websocket';
 import { ProxyAgent } from '../src/proxy-settings';
+import * as WebSocket from 'ws';
 
 /**
  * Self-signed certificate for a non-matching hostname (CN=evil.example) so that both the chain and
@@ -59,6 +60,28 @@ const noopHandler: any = {
   handleFailure: () => { /* noop */ },
   handleError: () => { /* noop */ }
 };
+
+describe('NodeWebSocket environment proxy exclusions', () => {
+  it('connects directly over ws when the destination is excluded', async () => {
+    const savedEnvironment = { ...process.env };
+    const server = new WebSocket.Server({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    try {
+      process.env.HTTP_PROXY = 'http://127.0.0.1:1';
+      delete process.env.http_proxy;
+      process.env.NO_PROXY = '127.0.0.1';
+      delete process.env.no_proxy;
+      const port = (server.address() as AddressInfo).port;
+      const url = ImmutableURL.newInstance('ws', `127.0.0.1:${port}`, '/ws/2');
+      const client = await NodeWebSocket.buildInstance(url, noopHandler, [], new ProxyAgent(), false);
+      client.close();
+    } finally {
+      process.env = savedEnvironment;
+      server.clients.forEach(client => client.terminate());
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+});
 
 /**
  * Regression tests for the TLS certificate validation of the NodeJS WebSocket transport.
@@ -114,6 +137,23 @@ describe('NodeWebSocket TLS certificate validation', () => {
     expect(webSocket).toBeTruthy();
     expect(capturedAuthorization).toBeDefined();
     webSocket.close();
+  });
+
+  it('bypasses an excluded wss proxy without bypassing TLS certificate validation', async () => {
+    const savedEnvironment = { ...process.env };
+    try {
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
+      delete process.env.https_proxy;
+      process.env.NO_PROXY = `127.0.0.1:${port}`;
+      delete process.env.no_proxy;
+      await expect(buildWss()).rejects.toMatchObject({ code: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
+      expect(capturedAuthorization).toBeUndefined();
+      const client = await buildWss(false);
+      expect(capturedAuthorization).toBeDefined();
+      client.close();
+    } finally {
+      process.env = savedEnvironment;
+    }
   });
 });
 

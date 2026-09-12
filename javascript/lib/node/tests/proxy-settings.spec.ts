@@ -29,6 +29,92 @@ function expectContainsCredentials(agent: any, username: string, password: strin
 const PROXY_URL = 'http://localhost:3128';
 
 describe('ProxyAgent', () => {
+  let savedEnvironment: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    savedEnvironment = { ...process.env };
+    ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy']
+      .forEach(name => delete process.env[name]);
+  });
+
+  afterEach(() => {
+    process.env = savedEnvironment;
+  });
+
+  describe('destination exclusions', () => {
+    beforeEach(() => {
+      process.env.HTTP_PROXY = PROXY_URL;
+      process.env.HTTPS_PROXY = PROXY_URL;
+    });
+
+    it.each([
+      ['localhost', 'http://localhost', true],
+      ['localhost', 'https://localhost', true],
+      ['localhost', 'ws://localhost', true],
+      ['localhost', 'wss://localhost', true],
+      ['localhost', 'http://notlocalhost', false],
+      ['example.org', 'https://example.org.evil.test', false],
+      ['example.org', 'https://sub.example.org', false],
+      ['.example.org', 'https://sub.example.org', true],
+      ['*.example.org', 'https://sub.example.org', true],
+      ['.example.org', 'https://example.org', false],
+      ['.example.org', 'https://badexample.org', false],
+      [' EXAMPLE.ORG, other.test ', 'http://example.org', true],
+      ['*', 'https://anything.test', true],
+      ['localhost:8080', 'http://localhost:8080', true],
+      ['localhost:8080', 'http://localhost:8081', false],
+      ['localhost:80', 'http://localhost', true],
+      ['localhost:443', 'https://localhost', true],
+      ['localhost:80', 'ws://localhost', true],
+      ['localhost:443', 'wss://localhost', true],
+      ['localhost:80', 'https://localhost', false],
+      ['127.0.0.1', 'http://127.0.0.1', true],
+      ['[::1]', 'http://[::1]', true],
+      ['[::1]:8080', 'http://[::1]:8080', true],
+      ['[::1]:8080', 'http://[::1]:8081', false],
+      ['', 'http://localhost', false],
+      ['localhost:invalid', 'http://localhost', false],
+      ['127.0.0.0/8', 'http://127.0.0.1', false],
+      ['example.org', 'http://example.org.', true],
+      ['example.org.', 'http://example.org', true]
+    ])('NO_PROXY=%s for %s has bypass=%s', (exclusion, destination, bypass) => {
+      process.env.NO_PROXY = exclusion as string;
+      const agent = new ProxyAgent();
+      expect(agent.getAgentForUrl(new URL(destination as string)) === undefined).toBe(bypass);
+    });
+
+    it('prefers nonempty lowercase no_proxy and evaluates each destination separately', () => {
+      process.env.no_proxy = 'localhost';
+      process.env.NO_PROXY = '*';
+      const agent = new ProxyAgent();
+      expect(agent.getAgentForUrl(new URL('http://localhost'))).toBeUndefined();
+      expect(agent.getAgentForUrl(new URL('http://remote.test'))).toBe(agent.httpProxyAgent);
+      expect(agent.getAgentForUrl(new URL('https://remote.test'))).toBe(agent.proxyAgent);
+      expect(agent.getAgentForUrl(new URL('ws://remote.test'))).toBe(agent.httpProxyAgent);
+      expect(agent.getAgentForUrl(new URL('wss://remote.test'))).toBe(agent.proxyAgent);
+    });
+
+    it('keeps explicit proxy options authoritative over environment exclusions', () => {
+      process.env.NO_PROXY = '*';
+      const agent = new ProxyAgent({ url: PROXY_URL });
+      expect(agent.getAgentForUrl(new URL('http://localhost'))).toBe(agent.httpProxyAgent);
+      expect(agent.getAgentForUrl(new URL('https://localhost'))).toBe(agent.proxyAgent);
+    });
+
+    it('falls back to uppercase NO_PROXY when lowercase no_proxy is empty', () => {
+      process.env.no_proxy = '';
+      process.env.NO_PROXY = 'localhost';
+      expect(new ProxyAgent().getAgentForUrl(new URL('http://localhost'))).toBeUndefined();
+    });
+
+    it('ignores all proxy environment settings when requested', () => {
+      process.env.NO_PROXY = '*';
+      const agent = new ProxyAgent({ ignoreProxyFromEnv: true });
+      expect(agent.getAgentForUrl(new URL('http://localhost'))).toBeUndefined();
+      const explicit = new ProxyAgent({ ignoreProxyFromEnv: true, url: PROXY_URL });
+      expect(explicit.getAgentForUrl(new URL('http://localhost'))).toBe(explicit.httpProxyAgent);
+    });
+  });
 
   describe('proxyAgent (https)', () => {
     beforeEach(() => {

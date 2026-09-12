@@ -49,6 +49,18 @@ The Node.js implementation supports setting up a proxy.
 Currently, it supports either reading directly from 'https_proxy' (or 'HTTPS_PROXY') environment variable
 or manually setting the proxy settings.
 
+For environment-configured proxies, `no_proxy` (or `NO_PROXY`) excludes destinations from proxying
+for HTTP, HTTPS, WS and WSS. A nonempty lowercase variable takes precedence. Settings are read when
+the client is constructed; each request is matched against its destination, not the proxy address.
+Entries may be separated by commas or whitespace and are case-insensitive; a trailing DNS root dot is ignored. A bare hostname or IP
+matches exactly; `.example.org` or `*.example.org` matches subdomains only (add `example.org` separately
+to exclude the domain itself). An optional `:port` limits the match to that port; omitted URL ports
+use 80 for HTTP/WS and 443 for HTTPS/WSS. IPv6 entries use brackets, e.g. `[::1]:8080`. `*` excludes all
+destinations. CIDR ranges and arbitrary wildcard patterns are not supported.
+
+Explicit `proxyOptions.url` takes precedence over these environment exclusions. Setting
+`ignoreProxyFromEnv: true` ignores all proxy environment variables, including exclusions.
+
 ```javascript
 // may also omit one or more of the options
 const proxyOptions = {

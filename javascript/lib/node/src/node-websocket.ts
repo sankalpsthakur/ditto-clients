@@ -89,10 +89,7 @@ export class NodeWebSocket implements WebSocketImplementation {
   }
 
   private static getProxyAgentForProtocol(url: DittoURL, agent: ProxyAgent): http.Agent | undefined {
-    if ('wss' === url.protocol) {
-      return agent.proxyAgent;
-    }
-    return agent.httpProxyAgent;
+    return agent.getAgentForUrl(new URL(url.toString()));
   }
 
   public executeCommand(request: string): void {
