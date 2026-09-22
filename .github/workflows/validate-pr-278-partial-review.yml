@@ -87,8 +87,6 @@ jobs:
                 const suffix = host.startsWith('.') ? host : isIP(host.replace(/^\\[|\\]$/g, '')) === 0 ? `.${host}` : '';
                 this.noProxy.push({ host, suffix, port: match[2] === undefined ? undefined : Number(match[2]) });
               }"""
-          lines = new.splitlines()
-          new = lines[0] + '\n' + '\n'.join(line[10:] for line in lines[1:])
           assert s.count(old) == 1
           s = s.replace(old, new)
           a = s.index('    return this.noProxy.toLowerCase().split(')
@@ -96,7 +94,7 @@ jobs:
           s = s[:a] + """    return this.noProxy.some(entry =>
                 (entry.host === '*' && entry.port === undefined)
                 || ((entry.port === undefined || entry.port === Number(port))
-                  && (hostname === entry.host || (entry.suffix !== '' && hostname.endsWith(entry.suffix)))));""".replace('\n          ', '\n') + s[b:]
+                  && (hostname === entry.host || (entry.suffix !== '' && hostname.endsWith(entry.suffix)))));""" + s[b:]
           p.write_text(s)
           p = Path('javascript/lib/node/README.md')
           s = p.read_text().replace("Currently, it supports either reading directly from 'https_proxy' (or 'HTTPS_PROXY') environment variable\nor manually setting the proxy settings.", "HTTP/WS connections read `http_proxy` (or `HTTP_PROXY`); HTTPS/WSS connections read\n`https_proxy` (or `HTTPS_PROXY`). Proxy settings may also be supplied manually.")
