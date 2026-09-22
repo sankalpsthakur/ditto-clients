@@ -35,8 +35,23 @@ jobs:
           echo 'dde7b68ef06f3203d17242ae07dbaaa390b81c6ac6909508f3e169537d6e4bc5  /tmp/apply_v2.py' | sha256sum -c -
           curl -fsSL https://raw.githubusercontent.com/sankalpsthakur/ditto-clients/ef0fa79debc1decb92a98f3f01e54a8a91ca2196/validation/extend_pr278_mechanics_v3.py -o /tmp/apply_v3.py
           sha256sum /tmp/apply_v3.py | tee /tmp/pr278-mechanics-v3/v3-script.sha256
-          python3 /tmp/apply_v2.py
-          python3 /tmp/apply_v3.py
+          # The v3 script uses a regex only to locate one existing method block. Feed
+          # its replacement through a callable so TypeScript backslashes stay literal.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/apply_v3.py')
+          s = p.read_text()
+          old = 's, count = pattern.subn(replacement, s, count=1)'
+          new = 's, count = pattern.subn(lambda _match: replacement, s, count=1)'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
+          PY
+          sha256sum /tmp/apply_v3.py | tee /tmp/pr278-mechanics-v3/v3-script-effective.sha256
+          python3 /tmp/apply_v2.py > /tmp/pr278-mechanics-v3/apply-v2.log 2>&1
+          if ! python3 /tmp/apply_v3.py > /tmp/pr278-mechanics-v3/apply-v3.log 2>&1; then
+            cat /tmp/pr278-mechanics-v3/apply-v3.log
+            exit 1
+          fi
           git diff --check
           git diff --binary > /tmp/pr278-mechanics-v3/fix.patch
           sha256sum /tmp/pr278-mechanics-v3/fix.patch | tee /tmp/pr278-mechanics-v3/fix.patch.sha256
