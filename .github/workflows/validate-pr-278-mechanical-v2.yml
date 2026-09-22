@@ -1,0 +1,69 @@
+name: Validate PR 278 mechanical review v2
+on:
+  push:
+    branches:
+      - validation/pr-278-mechanical-review-20260922
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8128589fc8e7fbee177bf73ad6695dbb94421f42
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: javascript/package-lock.json
+      - name: Install pinned workspace
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr278-mechanical-v2
+          git rev-parse HEAD HEAD^{tree} > /tmp/pr278-mechanical-v2/source.txt
+          { node --version; npm --version; uname -a; } > /tmp/pr278-mechanical-v2/environment.txt
+          cd javascript
+          npm ci > /tmp/pr278-mechanical-v2/install.log 2>&1
+          npm run build > /tmp/pr278-mechanical-v2/base-build.log 2>&1
+      - name: Fetch validation patch script from validation branch
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/sankalpsthakur/ditto-clients/d6860bd7fea1a663e8b3d2fbc56d64c01350c0e4/validation/apply_pr278_mechanical.py -o /tmp/apply_pr278_mechanical.py
+          echo 'dde7b68ef06f3203d17242ae07dbaaa390b81c6ac6909508f3e169537d6e4bc5  /tmp/apply_pr278_mechanical.py' | sha256sum -c -
+          python3 /tmp/apply_pr278_mechanical.py
+          git diff --check
+          git diff --binary > /tmp/pr278-mechanical-v2/fix.patch
+          git diff --stat | tee /tmp/pr278-mechanical-v2/diff-stat.txt
+          git diff --name-only | tee /tmp/pr278-mechanical-v2/changed-files.txt
+          test "$(git diff --name-only | wc -l)" -eq 6
+      - name: Run all existing Node workspace tests
+        working-directory: javascript/lib/node
+        run: |
+          set -euo pipefail
+          npm test -- --runInBand --json --outputFile=/tmp/pr278-mechanical-v2/after.json > /tmp/pr278-mechanical-v2/after.log 2>&1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/pr278-mechanical-v2/after.json').read_text())
+          summary = {k: data[k] for k in ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests', 'numTotalTestSuites']}
+          print(summary)
+          Path('/tmp/pr278-mechanical-v2/test-summary.json').write_text(json.dumps(summary, indent=2))
+          assert data['success'] and data['numFailedTests'] == 0 and data['numPendingTests'] == 0
+          assert data['numTotalTests'] >= 71 and data['numTotalTestSuites'] >= 5
+          PY
+      - name: Build and lint changed TypeScript files
+        working-directory: javascript
+        run: |
+          set -euo pipefail
+          npm run build --workspace=@eclipse-ditto/ditto-javascript-client-node > /tmp/pr278-mechanical-v2/build.log 2>&1
+          npx --no-install eslint lib/node/src/proxy-settings.ts lib/node/src/node-websocket.ts lib/node/tests/proxy-settings.spec.ts lib/node/tests/node-http.spec.ts lib/node/tests/node-websocket.spec.ts > /tmp/pr278-mechanical-v2/lint.log 2>&1
+          git diff --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr278-mechanical-review-v2-receipts
+          path: /tmp/pr278-mechanical-v2
+          retention-days: 14
