@@ -1,0 +1,141 @@
+name: Validate private PR 278 review corrections
+on:
+  push:
+    branches: [validation/pr-278-partial-review-20260922]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'sankalpsthakur/ditto-clients'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8128589fc8e7fbee177bf73ad6695dbb94421f42
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: javascript/package-lock.json
+      - name: Install pinned workspace
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr278-receipts
+          git rev-parse HEAD HEAD^{tree} > /tmp/pr278-receipts/source.txt
+          { node --version; npm --version; uname -a; } > /tmp/pr278-receipts/environment.txt
+          cd javascript
+          npm ci > /tmp/pr278-receipts/install.log 2>&1 || { tail -80 /tmp/pr278-receipts/install.log; exit 1; }
+          npm run build > /tmp/pr278-receipts/base-build.log 2>&1 || { tail -80 /tmp/pr278-receipts/base-build.log; exit 1; }
+      - name: Minimal regression changes without the implementation correction
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('javascript/lib/node/tests/proxy-settings.spec.ts')
+          s = p.read_text()
+          assert s.count("['example.org', 'https://sub.example.org', false]") == 1
+          s = s.replace("['example.org', 'https://sub.example.org', false]", "['example.org', 'https://sub.example.org', true]")
+          old = "      ['[::1]', 'http://[::1]', true],"
+          assert s.count(old) == 1
+          s = s.replace(old, old + "\n      ['::1', 'http://[::1]', true],\n      ['http://example.org', 'http://example.org', false],")
+          p.write_text(s)
+          PY
+      - name: Confirm two expected failures in real Jest
+        shell: bash
+        working-directory: javascript/lib/node
+        run: |
+          set -euo pipefail
+          set +e
+          npm test -- --runInBand --runTestsByPath tests/proxy-settings.spec.ts --json --outputFile=/tmp/pr278-receipts/before.json > /tmp/pr278-receipts/before.log 2>&1
+          result=$?
+          set -e
+          tail -60 /tmp/pr278-receipts/before.log
+          test "$result" -eq 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/pr278-receipts/before.json').read_text())
+          print({k: data[k] for k in ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests']})
+          assert data['numFailedTests'] == 2 and data['numPendingTests'] == 0
+          failed = [x for suite in data['testResults'] for x in suite['assertionResults'] if x['status'] == 'failed']
+          text = '\n'.join(x['fullName'] for x in failed)
+          assert 'sub.example.org' in text and '::1' in text, text
+          PY
+      - name: Apply the private selector and documentation correction
+        id: correction
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p = Path('javascript/lib/node/src/proxy-settings.ts')
+          s = p.read_text()
+          s = s.replace("const { UrlWithStringQuery, parse } = require('url');", "const { UrlWithStringQuery, parse } = require('url');\nconst { isIP } = require('net');")
+          s = s.replace('  private readonly noProxy: string;', '  private readonly noProxy: { host: string; suffix: string; port?: number }[] = [];')
+          old = "    this.noProxy = options?.url !== undefined || options?.ignoreProxyFromEnv\n      ? '' : process.env.no_proxy || process.env.NO_PROXY || '';"
+          new = """    const noProxy = options?.url !== undefined || options?.ignoreProxyFromEnv
+                ? '' : process.env.no_proxy || process.env.NO_PROXY || '';
+              for (const entry of noProxy.toLowerCase().split(/[\\s,]+/)) {
+                const normalizedEntry = isIP(entry) === 6 ? `[${entry}]` : entry;
+                const match = /^(\\[[^\\]]+\\]|[^:]+)(?::(\\d+))?$/.exec(normalizedEntry);
+                if (match === null) {
+                  continue;
+                }
+                const host = match[1].replace(/^\\*\\./, '.').replace(/\\.$/, '');
+                const suffix = host.startsWith('.') ? host : isIP(host.replace(/^\\[|\\]$/g, '')) === 0 ? `.${host}` : '';
+                this.noProxy.push({ host, suffix, port: match[2] === undefined ? undefined : Number(match[2]) });
+              }"""
+          lines = new.splitlines()
+          new = lines[0] + '\n' + '\n'.join(line[10:] for line in lines[1:])
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          a = s.index('    return this.noProxy.toLowerCase().split(')
+          b = s.index('\n  }\n}', a)
+          s = s[:a] + """    return this.noProxy.some(entry =>
+                (entry.host === '*' && entry.port === undefined)
+                || ((entry.port === undefined || entry.port === Number(port))
+                  && (hostname === entry.host || (entry.suffix !== '' && hostname.endsWith(entry.suffix)))));""".replace('\n          ', '\n') + s[b:]
+          p.write_text(s)
+          p = Path('javascript/lib/node/README.md')
+          s = p.read_text().replace("Currently, it supports either reading directly from 'https_proxy' (or 'HTTPS_PROXY') environment variable\nor manually setting the proxy settings.", "HTTP/WS connections read `http_proxy` (or `HTTP_PROXY`); HTTPS/WSS connections read\n`https_proxy` (or `HTTPS_PROXY`). Proxy settings may also be supplied manually.")
+          s = s.replace("Entries may be separated by commas or whitespace and are case-insensitive; a trailing DNS root dot is ignored. A bare hostname or IP\nmatches exactly; `.example.org` or `*.example.org` matches subdomains only (add `example.org` separately\nto exclude the domain itself). An optional `:port` limits the match to that port; omitted URL ports\nuse 80 for HTTP/WS and 443 for HTTPS/WSS. IPv6 entries use brackets, e.g. `[::1]:8080`. `*` excludes all", "Entries may be separated by commas or whitespace and are case-insensitive; a trailing DNS root dot is ignored.\nA bare hostname matches itself and its subdomains; an IP address matches exactly.\n`.example.org` or `*.example.org` matches subdomains only. An optional `:port` limits the match to that port; omitted URL ports\nuse 80 for HTTP/WS and 443 for HTTPS/WSS. IPv6 entries may be bare (`::1`) or bracketed; use brackets with a port,\ne.g. `[::1]:8080`. `*` excludes all")
+          p.write_text(s)
+          expected = {'javascript/lib/node/src/proxy-settings.ts': '47b6769f16fcb32eb3106c75c6be5a4779002000191087a3739542d9c5077c84', 'javascript/lib/node/tests/proxy-settings.spec.ts': '2c136efcddd3722721203689a8b8507cfd368d244b09306585d8a509dde08f7c', 'javascript/lib/node/README.md': '3764ff0a06d57531e686604eb87d7d2e11df97662308a97b8554af76e4b4f431'}
+          for name, digest in expected.items():
+              got = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert got == digest, (name, got, digest)
+          PY
+          git diff --check
+          git diff --binary > /tmp/pr278-receipts/fix.patch
+          git diff --stat
+      - name: Run all existing Node workspace tests after correction
+        working-directory: javascript/lib/node
+        run: |
+          set -euo pipefail
+          npm test -- --runInBand --json --outputFile=/tmp/pr278-receipts/after.json > /tmp/pr278-receipts/after.log 2>&1 || { tail -100 /tmp/pr278-receipts/after.log; exit 1; }
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/pr278-receipts/after.json').read_text())
+          print({k: data[k] for k in ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests', 'numTotalTestSuites']})
+          assert data['success'] and data['numFailedTests'] == 0 and data['numPendingTests'] == 0
+          assert data['numTotalTests'] >= 71 and data['numTotalTestSuites'] >= 5
+          PY
+      - name: Node build and changed-file lint
+        if: always() && steps.correction.outcome == 'success'
+        working-directory: javascript
+        run: |
+          set -euo pipefail
+          npm run build --workspace=@eclipse-ditto/ditto-javascript-client-node > /tmp/pr278-receipts/build.log 2>&1 || { tail -80 /tmp/pr278-receipts/build.log; exit 1; }
+          npx --no-install eslint lib/node/src/proxy-settings.ts lib/node/tests/proxy-settings.spec.ts > /tmp/pr278-receipts/lint.log 2>&1 || { cat /tmp/pr278-receipts/lint.log; exit 1; }
+          git diff --check
+          git diff --name-only > /tmp/pr278-receipts/changed-files.txt
+          test "$(git diff --name-only | wc -l)" -eq 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr278-partial-review-receipts
+          path: /tmp/pr278-receipts
+          retention-days: 14
